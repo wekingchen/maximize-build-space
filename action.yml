@@ -144,6 +144,15 @@ runs:
           sudo swapoff -a
           sudo rm -f /mnt/swapfile
 
+          # Check if /mnt is a separate mount point
+          MNT_IS_SEPARATE_MOUNT=false
+          if mountpoint -q /mnt; then
+            MNT_IS_SEPARATE_MOUNT=true
+            echo "/mnt is a separate mount point, will use it for LVM"
+          else
+            echo "/mnt is NOT a separate mount point, will skip it"
+          fi
+
           echo "Creating LVM Volume."
           echo "  Creating LVM PV on root fs."
           # create loop pv image on root fs
@@ -155,18 +164,24 @@ runs:
           export ROOT_LOOP_DEV=$(sudo losetup --find --show "${{ inputs.pv-loop-path }}")
           sudo pvcreate -f "${ROOT_LOOP_DEV}"
 
-          # create pv on temp disk
-          echo "  Creating LVM PV on temp fs."
-          TMP_RESERVE_KB=$(expr ${{ inputs.temp-reserve-mb }} \* 1024)
-          TMP_FREE_KB=$(df --block-size=1024 --output=avail /mnt | tail -1)
-          TMP_LVM_SIZE_KB=$(expr $TMP_FREE_KB - $TMP_RESERVE_KB)
-          TMP_LVM_SIZE_BYTES=$(expr $TMP_LVM_SIZE_KB \* 1024)
-          sudo touch "${{ inputs.tmp-pv-loop-path }}" && sudo fallocate -z -l "${TMP_LVM_SIZE_BYTES}" "${{ inputs.tmp-pv-loop-path }}"
-          export TMP_LOOP_DEV=$(sudo losetup --find --show "${{ inputs.tmp-pv-loop-path }}")
-          sudo pvcreate -f "${TMP_LOOP_DEV}"
+          # Only create temp PV if /mnt is a separate mount point
+          PV_DEVICES="${ROOT_LOOP_DEV}"
+          if [[ "${MNT_IS_SEPARATE_MOUNT}" == "true" ]]; then
+            echo "  Creating LVM PV on temp fs."
+            TMP_RESERVE_KB=$(expr ${{ inputs.temp-reserve-mb }} \* 1024)
+            TMP_FREE_KB=$(df --block-size=1024 --output=avail /mnt | tail -1)
+            TMP_LVM_SIZE_KB=$(expr $TMP_FREE_KB - $TMP_RESERVE_KB)
+            TMP_LVM_SIZE_BYTES=$(expr $TMP_LVM_SIZE_KB \* 1024)
+            sudo touch "${{ inputs.tmp-pv-loop-path }}" && sudo fallocate -z -l "${TMP_LVM_SIZE_BYTES}" "${{ inputs.tmp-pv-loop-path }}"
+            export TMP_LOOP_DEV=$(sudo losetup --find --show "${{ inputs.tmp-pv-loop-path }}")
+            sudo pvcreate -f "${TMP_LOOP_DEV}"
+            PV_DEVICES="${TMP_LOOP_DEV} ${ROOT_LOOP_DEV}"
+          else
+            echo "  Skipping temp fs PV creation (no separate /mnt mount)"
+          fi
 
-          # create volume group from these pvs
-          sudo vgcreate "${VG_NAME}" "${TMP_LOOP_DEV}" "${ROOT_LOOP_DEV}"
+          # create volume group from available pvs
+          sudo vgcreate "${VG_NAME}" ${PV_DEVICES}
 
           echo "Recreating swap"
           # create and activate swap
